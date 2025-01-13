@@ -22,10 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-# Generalised the code for import of names and face_encodings 
-# Unknown faces are now saved in a folder named unknown_faces in the project directory
-# Fixed the issue where time of the recognition was same for all the faces recognised 
-# Follow the dictionary format in store1.csv ie "name" "image_path" if you import your own file 
 import cv2
 import csv
 import face_recognition
@@ -36,27 +32,22 @@ import subprocess
 import logging
 import time
 
-# Set up logging
 logging.basicConfig(
     filename='security_system.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Create a folder for unknown faces if it doesn't exist already
 unknown_faces_folder = "unknown_faces" 
 os.makedirs(unknown_faces_folder, exist_ok=True)
 
 def logout_user():
-    """Function to gracefully log out the current user only"""
     try:
-        # Get current user
         current_user = os.getenv('USER')
         if not current_user:
             logging.error("Could not determine current user")
             return False
             
-        # Get current user's display
         display = os.getenv('DISPLAY')
         if not display:
             logging.error("Could not determine display")
@@ -64,20 +55,16 @@ def logout_user():
 
         logging.warning(f"Security breach detected - Gracefully logging out user: {current_user}")
         
-        # First try gentle logout via gnome-session-quit
         try:
             subprocess.run(['gnome-session-quit', '--force'], timeout=5)
             return True
         except (subprocess.SubprocessError, subprocess.TimeoutExpired):
             logging.warning("gnome-session-quit failed, trying alternative method")
         
-        # If gnome-session-quit fails, try TERM signal
         try:
-            # Get all processes for current user on current display
             ps_cmd = f"ps -u {current_user} | grep {display}"
             processes = subprocess.check_output(ps_cmd, shell=True).decode().strip().split('\n')
             
-            # Send TERM signal to user's display processes
             for proc in processes:
                 if proc:
                     pid = proc.split()[0]
@@ -99,15 +86,12 @@ def logout_user():
 
 video_capture = cv2.VideoCapture(0)
 
-# Specify the folder location and csv file location
 database_folder = "database1"
 csv_file = "store1.csv"
 
-# Store the faceencodings and names of the people in the database
 known_face_encodings = []
 known_face_names = []
 
-# Read the CSV file and load face encodings
 with open(csv_file, newline='') as csvfile:
     reader = csv.DictReader(csvfile)
     for row in reader:
@@ -124,20 +108,15 @@ with open(csv_file, newline='') as csvfile:
         except Exception as e:
             print(f"Error processing image {image_path}: {str(e)}")
 
-# Creating a copy of the names list
 students = known_face_names.copy()
 
-# Get the current date for the CSV filename
 current_date = datetime.datetime.now().strftime("%Y-%m-%d")
 
-# Open the CSV file for writing, or create it 
 f = open(f"{current_date}.csv", "w+", newline="")
 lnwriter = csv.writer(f)
 
-# Initialize a counter for unknown faces
 unknown_face_counter = 1
 
-#Check if the unknown faces in the webcam feed are already in the unknown folder  
 def is_face_unique(face_encoding, folder_path):
     for filename in os.listdir(folder_path):
         if filename.endswith(".jpg"):
@@ -150,9 +129,8 @@ def is_face_unique(face_encoding, folder_path):
                     return False
     return True
 
-# Initialize variables for security features
 unknown_face_detected_time = None
-SECURITY_THRESHOLD_TIME = 3  # Seconds to wait before logout
+SECURITY_THRESHOLD_TIME = 3
 security_warning_shown = False
 
 while True:
@@ -160,12 +138,10 @@ while True:
     if not ret:
         continue
         
-    # Convert the image from BGR color to RGB color
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     face_locations = face_recognition.face_locations(rgb_frame)
     
-    # Only attempt face encoding if faces are found
     face_encodings = []
     if face_locations:
         try:
@@ -181,7 +157,7 @@ while True:
         name = "Unknown"
 
         face_distance = face_recognition.face_distance(known_face_encodings, face_encoding)
-        if len(face_distance) > 0:  # Check if there are any known faces to compare with
+        if len(face_distance) > 0:
             best_match_index = np.argmin(face_distance)
             if matches[best_match_index]:
                 name = known_face_names[best_match_index]
@@ -193,19 +169,24 @@ while True:
         
         if name == "Unknown":
             unknown_detected = True
-            # Save unknown face if unique
             if is_face_unique(face_encoding, unknown_faces_folder):
-                face_image = frame[top:bottom, left:right]
+                margin = 60
+                height, width = frame.shape[:2]
+                
+                face_top = max(0, top - margin)
+                face_bottom = min(height, bottom + margin)
+                face_left = max(0, left - margin)
+                face_right = min(width, right + margin)
+                
+                face_image = frame[face_top:face_bottom, face_left:face_right]
                 face_filename = f"{unknown_faces_folder}/unknown_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
                 cv2.imwrite(face_filename, face_image)
                 logging.warning(f"Unknown face detected and saved: {face_filename}")
                 
-            # Start timer for security response if not already started
             if unknown_face_detected_time is None:
                 unknown_face_detected_time = time.time()
                 logging.warning("Unknown face detected - Starting security countdown")
 
-        # Display name with red background for unknown faces
         color = (0, 0, 255) if name == "Unknown" else (0, 255, 0)
         cv2.rectangle(frame, (left, bottom - 35), (right, bottom), color, cv2.FILLED)
         font = cv2.FONT_HERSHEY_DUPLEX
@@ -216,11 +197,9 @@ while True:
             current_time = datetime.datetime.now().strftime("%H:%M:%S")
             lnwriter.writerow([name, current_time])
 
-    # Security response for unknown faces
     if unknown_detected and unknown_face_detected_time is not None:
         time_elapsed = time.time() - unknown_face_detected_time
         if time_elapsed >= SECURITY_THRESHOLD_TIME:
-            # Display warning message on frame
             warning_text = "SECURITY ALERT - Unauthorized User Detected"
             cv2.putText(frame, warning_text, (10, 30), cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
             
