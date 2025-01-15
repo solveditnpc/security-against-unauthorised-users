@@ -43,6 +43,9 @@ class SecurityCamera:
         self.tolerance = tolerance
         self.unknown_faces_dir = "unknown_faces"
         self.check_interval = 5.0
+        self.show_camera = True
+        self.warning_active = False
+        self.warning_start_time = None
         
         os.makedirs(self.unknown_faces_dir, exist_ok=True)
         
@@ -80,10 +83,19 @@ class SecurityCamera:
 
     def _save_unknown_face(self, face_image: np.ndarray) -> None:
         try:
+            margin = 100
+            height, width = face_image.shape[:2]
+            new_height = height + 2 * margin
+            new_width = width + 2 * margin
+            
+            image_with_margin = np.full((new_height, new_width, 3), 255, dtype=np.uint8)
+            
+            image_with_margin[margin:margin+height, margin:margin+width] = face_image
+            
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{self.unknown_faces_dir}/unknown_{timestamp}.jpg"
-            cv2.imwrite(filename, face_image)
-            logging.info(f"Saved unknown face: {filename}")
+            cv2.imwrite(filename, image_with_margin)
+            logging.info(f"Saved unknown face with margin: {filename}")
         except Exception as e:
             logging.error(f"Failed to save unknown face: {str(e)}")
 
@@ -155,31 +167,65 @@ class SecurityCamera:
                     authorized_found, face_locations, names = self._process_frame(frame)
                     
                     for (top, right, bottom, left), name in zip(face_locations, names):
-                        cv2.rectangle(frame, (left, top), (right, bottom), (0, 0, 255), 2)
+                        color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+                        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
                         cv2.putText(frame, name, (left, top - 10),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1)
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
                     
                     if not authorized_found and face_locations:
+                        if not self.warning_active:
+                            self.warning_active = True
+                            self.warning_start_time = current_time
+                        
                         if previous_unauthorized:
                             logging.warning("Unauthorized face detected in consecutive frames")
                             self.logout()
                             return
                         previous_unauthorized = True
-                        warning = "UNAUTHORIZED ACCESS! Will logout if unauthorized in next frame"
-                        cv2.putText(frame, warning, (10, 60),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                     else:
+                        if authorized_found:
+                            self.warning_active = False
+                            self.warning_start_time = None
                         previous_unauthorized = False
-                        next_check = self.check_interval - time_diff
-                        status = f"Next check in: {next_check:.1f}s"
-                        cv2.putText(frame, status, (10, 30),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                     
                     last_check_time = current_time
+
+                if self.warning_active:
+                    warning = "UNAUTHORIZED ACCESS! Will logout if unauthorized in next frame"
+                    overlay = frame.copy()
+                    cv2.rectangle(overlay, (0, 40), (frame.shape[1], 90), (0, 0, 255), -1)
+                    cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+                    cv2.putText(frame, warning, (10, 70),
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+                    
+                    if self.warning_start_time:
+                        duration = (current_time - self.warning_start_time).total_seconds()
+                        duration_text = f"Warning active for: {duration:.1f}s"
+                        cv2.putText(frame, duration_text, (10, 100),
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                else:
+                    next_check = self.check_interval - time_diff
+                    status = f"Next check in: {next_check:.1f}s"
+                    cv2.putText(frame, status, (10, 30),
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
-                cv2.imshow('Security Camera', frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                cv2.putText(frame, "Press 'h' to toggle camera feed", (10, frame.shape[0] - 10),
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                
+                if self.show_camera:
+                    cv2.imshow('Security Camera', frame)
+                else:
+                    black_screen = np.zeros_like(frame)
+                    cv2.putText(black_screen, "Camera Feed Hidden (Press 'h' to show)",
+                              (10, black_screen.shape[0] // 2),
+                              cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.imshow('Security Camera', black_screen)
+                
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
+                elif key == ord('h'):
+                    self.show_camera = not self.show_camera
                     
         except Exception as e:
             logging.error(f"Camera error: {str(e)}")
