@@ -46,6 +46,7 @@ class SecurityCamera:
         self.show_camera = True
         self.warning_active = False
         self.warning_start_time = None
+        self.window_name = 'Security Camera'
         
         os.makedirs(self.unknown_faces_dir, exist_ok=True)
         
@@ -56,6 +57,8 @@ class SecurityCamera:
         self.known_faces, self.known_names = self._load_known_faces()
         if not self.known_faces:
             raise RuntimeError("No known faces found in database")
+            
+        cv2.namedWindow(self.window_name)
 
     def _load_known_faces(self) -> Tuple[List[np.ndarray], List[str]]:
         known_faces = []
@@ -213,13 +216,19 @@ class SecurityCamera:
                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
                 
                 if self.show_camera:
-                    cv2.imshow('Security Camera', frame)
+                    try:
+                        if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
+                            cv2.namedWindow(self.window_name)
+                        cv2.imshow(self.window_name, frame)
+                    except:
+                        cv2.namedWindow(self.window_name)
+                        cv2.imshow(self.window_name, frame)
                 else:
-                    black_screen = np.zeros_like(frame)
-                    cv2.putText(black_screen, "Camera Feed Hidden (Press 'h' to show)",
-                              (10, black_screen.shape[0] // 2),
-                              cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                    cv2.imshow('Security Camera', black_screen)
+                    try:
+                        if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) >= 0:
+                            cv2.destroyWindow(self.window_name)
+                    except:
+                        pass
                 
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q'):
