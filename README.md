@@ -76,6 +76,16 @@ python security_linux.py
 - Press 'q' to quit the application
 - The system will automatically log out the current user if an unauthorized face is detected in consecutive frames
 
+### Code Structure
+
+The main script `security_linux.py` is structured to be self-documenting with clear variable names and logical organization. Key components include:
+
+- Face detection and recognition using the `face_recognition` library
+- Real-time camera feed processing with OpenCV
+- Automatic logging of security events
+- Force logout capability for unauthorized access
+- Support for toggling camera feed visibility
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
