@@ -30,6 +30,8 @@ import logging
 import subprocess
 import datetime
 from typing import List, Tuple, Optional
+from pynput import keyboard
+from threading import Lock
 
 logging.basicConfig(
     filename='security_system.log',
@@ -47,6 +49,8 @@ class SecurityCamera:
         self.warning_active = False
         self.warning_start_time = None
         self.window_name = 'Security Camera'
+        self.exit_keys = {'q': False, 'u': False, 'i': False, 't': False}
+        self.key_lock = Lock()
         
         os.makedirs(self.unknown_faces_dir, exist_ok=True)
         
@@ -59,6 +63,26 @@ class SecurityCamera:
             raise RuntimeError("No known faces found in database")
             
         cv2.namedWindow(self.window_name)
+        
+        self._setup_keyboard_hooks()
+        
+    def _setup_keyboard_hooks(self):
+        def on_key_press(key):
+            if hasattr(key, 'char') and key.char in self.exit_keys:
+                with self.key_lock:
+                    self.exit_keys[key.char] = True
+        
+        def on_key_release(key):
+            if hasattr(key, 'char') and key.char in self.exit_keys:
+                with self.key_lock:
+                    self.exit_keys[key.char] = False
+        
+        self.listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
+        self.listener.start()
+    
+    def _check_exit_condition(self) -> bool:
+        with self.key_lock:
+            return all(self.exit_keys.values())
 
     def _load_known_faces(self) -> Tuple[List[np.ndarray], List[str]]:
         known_faces = []
@@ -166,6 +190,10 @@ class SecurityCamera:
                 current_time = datetime.datetime.now()
                 time_diff = (current_time - last_check_time).total_seconds()
                 
+                if self._check_exit_condition():
+                    logging.info("Exit sequence detected (QUIT)")
+                    break
+                
                 if time_diff >= self.check_interval:
                     authorized_found, face_locations, names = self._process_frame(frame)
                     
@@ -231,9 +259,7 @@ class SecurityCamera:
                         pass
                 
                 key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
-                elif key == ord('h'):
+                if key == ord('h'):
                     self.show_camera = not self.show_camera
                     
         except Exception as e:
@@ -272,6 +298,7 @@ class SecurityCamera:
             logging.error(f"Logout failed: {str(e)}")
 
     def cleanup(self):
+        self.listener.stop()
         self.camera.release()
         cv2.destroyAllWindows()
 
