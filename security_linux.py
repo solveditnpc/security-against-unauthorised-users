@@ -51,6 +51,7 @@ class SecurityCamera:
         self.window_name = 'Security Camera'
         self.exit_keys = {'q': False, 'u': False, 'i': False, 't': False}
         self.key_lock = Lock()
+        self.keyboard_listener = None
         
         os.makedirs(self.unknown_faces_dir, exist_ok=True)
         
@@ -64,25 +65,31 @@ class SecurityCamera:
             
         cv2.namedWindow(self.window_name)
         
-        self._setup_keyboard_hooks()
+        self._setup_keyboard_listener()
+
+    def _setup_keyboard_listener(self):
+        def on_press(key):
+            try:
+                char = key.char
+                if char in self.exit_keys:
+                    with self.key_lock:
+                        self.exit_keys[char] = True
+            except AttributeError:
+                pass
+                
+        def on_release(key):
+            try:
+                char = key.char
+                if char in self.exit_keys:
+                    with self.key_lock:
+                        self.exit_keys[char] = False
+            except AttributeError:
+                pass
         
-    def _setup_keyboard_hooks(self):
-        def on_key_press(key):
-            if hasattr(key, 'char') and key.char in self.exit_keys:
-                with self.key_lock:
-                    self.exit_keys[key.char] = True
-        
-        def on_key_release(key):
-            if hasattr(key, 'char') and key.char in self.exit_keys:
-                with self.key_lock:
-                    self.exit_keys[key.char] = False
-        
-        self.listener = keyboard.Listener(on_press=on_key_press, on_release=on_key_release)
-        self.listener.start()
-    
-    def _check_exit_condition(self) -> bool:
-        with self.key_lock:
-            return all(self.exit_keys.values())
+        self.keyboard_listener = keyboard.Listener(
+            on_press=on_press,
+            on_release=on_release)
+        self.keyboard_listener.start()
 
     def _load_known_faces(self) -> Tuple[List[np.ndarray], List[str]]:
         known_faces = []
@@ -108,21 +115,27 @@ class SecurityCamera:
                 
         return known_faces, known_names
 
-    def _save_unknown_face(self, face_image: np.ndarray) -> None:
+    def _save_unknown_face(self, frame: np.ndarray, face_location: Tuple[int, int, int, int]) -> None:
         try:
-            margin = 100
-            height, width = face_image.shape[:2]
-            new_height = height + 2 * margin
-            new_width = width + 2 * margin
+            top, right, bottom, left = face_location
             
-            image_with_margin = np.full((new_height, new_width, 3), 255, dtype=np.uint8)
+            height, width = frame.shape[:2]
+            padding = int(min(height, width) * 0.2)
             
-            image_with_margin[margin:margin+height, margin:margin+width] = face_image
+            pad_top = max(0, top - padding)
+            pad_bottom = min(height, bottom + padding)
+            pad_left = max(0, left - padding)
+            pad_right = min(width, right + padding)
+            
+            face_image = frame[pad_top:pad_bottom, pad_left:pad_right]
             
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{self.unknown_faces_dir}/unknown_{timestamp}.jpg"
-            cv2.imwrite(filename, image_with_margin)
-            logging.info(f"Saved unknown face with margin: {filename}")
+            cv2.imwrite(filename, face_image)
+            
+            context_size = face_image.shape[:2]
+            logging.info(f"Saved unknown face with context: {filename}, context size: {context_size}")
+            
         except Exception as e:
             logging.error(f"Failed to save unknown face: {str(e)}")
 
@@ -145,6 +158,10 @@ class SecurityCamera:
                 
         return True
 
+    def _check_exit_condition(self) -> bool:
+        with self.key_lock:
+            return all(self.exit_keys.values())
+
     def _process_frame(self, frame: np.ndarray) -> Tuple[bool, List[Tuple[int, int, int, int]], List[str]]:
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         face_locations = face_recognition.face_locations(rgb_frame)
@@ -153,7 +170,7 @@ class SecurityCamera:
         authorized_found = False
         names = []
         
-        for face_encoding in face_encodings:
+        for i, face_encoding in enumerate(face_encodings):
             matches = face_recognition.compare_faces(
                 self.known_faces, face_encoding, tolerance=self.tolerance
             )
@@ -165,12 +182,7 @@ class SecurityCamera:
                 authorized_found = True
                 logging.info(f"Authorized user detected: {name}")
             elif self._is_face_unique(face_encoding):
-                face_location = face_locations[len(names)]
-                face_img = frame[
-                    face_location[0]:face_location[2],
-                    face_location[3]:face_location[1]
-                ]
-                self._save_unknown_face(face_img)
+                self._save_unknown_face(frame, face_locations[i])
                 
             names.append(name)
             
@@ -240,9 +252,6 @@ class SecurityCamera:
                     cv2.putText(frame, status, (10, 30),
                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
                 
-                cv2.putText(frame, "Press 'h' to toggle camera feed", (10, frame.shape[0] - 10),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-                
                 if self.show_camera:
                     try:
                         if cv2.getWindowProperty(self.window_name, cv2.WND_PROP_VISIBLE) < 1:
@@ -298,7 +307,8 @@ class SecurityCamera:
             logging.error(f"Logout failed: {str(e)}")
 
     def cleanup(self):
-        self.listener.stop()
+        if self.keyboard_listener:
+            self.keyboard_listener.stop()
         self.camera.release()
         cv2.destroyAllWindows()
 
