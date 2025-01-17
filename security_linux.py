@@ -40,9 +40,10 @@ logging.basicConfig(
 )
 
 class SecurityCamera:
-    def __init__(self, database_path: str = "database1", tolerance: float = 0.6):
+    def __init__(self, database_path: str = "database1", tolerance: float = 0.6, max_width: int = 640):
         self.database_path = database_path
         self.tolerance = tolerance
+        self.max_width = max_width
         self.unknown_faces_dir = "unknown_faces"
         self.check_interval = 5.0
         self.show_camera = True
@@ -115,6 +116,26 @@ class SecurityCamera:
                 
         return known_faces, known_names
 
+    def _scale_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, float]:
+        height, width = frame.shape[:2]
+        if width <= self.max_width:
+            return frame, 1.0
+            
+        scale_factor = self.max_width / width
+        new_width = int(width * scale_factor)
+        new_height = int(height * scale_factor)
+        scaled_frame = cv2.resize(frame, (new_width, new_height))
+        return scaled_frame, scale_factor
+
+    def _scale_coordinates(self, coordinates: Tuple[int, int, int, int], scale_factor: float) -> Tuple[int, int, int, int]:
+        top, right, bottom, left = coordinates
+        return (
+            int(top / scale_factor),
+            int(right / scale_factor),
+            int(bottom / scale_factor),
+            int(left / scale_factor)
+        )
+
     def _save_unknown_face(self, frame: np.ndarray, face_location: Tuple[int, int, int, int]) -> None:
         try:
             top, right, bottom, left = face_location
@@ -163,12 +184,16 @@ class SecurityCamera:
             return all(self.exit_keys.values())
 
     def _process_frame(self, frame: np.ndarray) -> Tuple[bool, List[Tuple[int, int, int, int]], List[str]]:
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        scaled_frame, scale_factor = self._scale_frame(frame)
+        
+        rgb_frame = cv2.cvtColor(scaled_frame, cv2.COLOR_BGR2RGB)
+        
         face_locations = face_recognition.face_locations(rgb_frame)
         face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
         
         authorized_found = False
         names = []
+        scaled_locations = []
         
         for i, face_encoding in enumerate(face_encodings):
             matches = face_recognition.compare_faces(
@@ -182,11 +207,13 @@ class SecurityCamera:
                 authorized_found = True
                 logging.info(f"Authorized user detected: {name}")
             elif self._is_face_unique(face_encoding):
-                self._save_unknown_face(frame, face_locations[i])
+                scaled_loc = self._scale_coordinates(face_locations[i], scale_factor)
+                self._save_unknown_face(frame, scaled_loc)
                 
             names.append(name)
+            scaled_locations.append(self._scale_coordinates(face_locations[i], scale_factor))
             
-        return authorized_found, face_locations, names
+        return authorized_found, scaled_locations, names
 
     def run(self):
         last_check_time = datetime.datetime.now()
@@ -226,12 +253,15 @@ class SecurityCamera:
                             return
                         previous_unauthorized = True
                     else:
-                        if authorized_found:
-                            self.warning_active = False
-                            self.warning_start_time = None
                         previous_unauthorized = False
                     
                     last_check_time = current_time
+
+                if self.warning_active and self.warning_start_time:
+                    warning_duration = (current_time - self.warning_start_time).total_seconds()
+                    if warning_duration >= self.check_interval:
+                        self.warning_active = False
+                        self.warning_start_time = None
 
                 if self.warning_active:
                     warning = "UNAUTHORIZED ACCESS! Will logout if unauthorized in next frame"
@@ -242,10 +272,11 @@ class SecurityCamera:
                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
                     
                     if self.warning_start_time:
-                        duration = (current_time - self.warning_start_time).total_seconds()
-                        duration_text = f"Warning active for: {duration:.1f}s"
-                        cv2.putText(frame, duration_text, (10, 100),
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                        remaining_time = self.check_interval - (current_time - self.warning_start_time).total_seconds()
+                        if remaining_time > 0:
+                            duration_text = f"Warning expires in: {remaining_time:.1f}s"
+                            cv2.putText(frame, duration_text, (10, 100),
+                                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
                 else:
                     next_check = self.check_interval - time_diff
                     status = f"Next check in: {next_check:.1f}s"
