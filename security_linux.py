@@ -29,6 +29,7 @@ import os
 import logging
 import subprocess
 import datetime
+import json
 from typing import List, Tuple, Optional
 from pynput import keyboard
 from threading import Lock
@@ -45,14 +46,31 @@ class SecurityCamera:
         self.tolerance = tolerance
         self.max_width = max_width
         self.unknown_faces_dir = "unknown_faces"
-        self.check_interval = 5.0
-        self.show_camera = True
-        self.warning_active = False
-        self.warning_start_time = None
-        self.window_name = 'Security Camera'
+        self.check_interval = 10.0  # seconds between checks
+        self.show_camera = True  # Toggle for camera feed visibility
+        self.warning_active = False  # Track if warning should be displayed
+        self.warning_start_time = None  # Track when warning started
+        self.window_name = 'Security Camera'  # Name of the camera window
         self.exit_keys = {'q': False, 'u': False, 'i': False, 't': False}
         self.key_lock = Lock()
         self.keyboard_listener = None
+        
+        # CPU monitoring thresholds and stats
+        self.cpu_high_threshold = 80  # CPU % threshold for high load
+        self.cpu_medium_threshold = 60  # CPU % threshold for medium load
+        self.frame_skip = 1  # Dynamic frame skip value
+        self.frame_counter = 0  # Counter for frame skipping
+        self.last_cpu_time = None  # Last CPU time reading
+        self.last_idle_time = None  # Last CPU idle time reading
+        self.cpu_history = []  # Store recent CPU readings
+        self.history_size = 5  # Number of readings to keep
+        self.min_frame_skip = 1  # Minimum frame skip
+        self.max_frame_skip = 10  # Maximum frame skip
+        self.stats_file = "cpu_stats.json"  # File to store CPU statistics
+        self.stats_update_interval = 1.0  # Update stats every second
+        self.last_stats_update = datetime.datetime.now()
+        
+        self._init_cpu_stats()
         
         os.makedirs(self.unknown_faces_dir, exist_ok=True)
         
@@ -67,6 +85,102 @@ class SecurityCamera:
         cv2.namedWindow(self.window_name)
         
         self._setup_keyboard_listener()
+
+    def _init_cpu_stats(self):
+        if os.path.exists(self.stats_file):
+            try:
+                with open(self.stats_file, 'r') as f:
+                    self.cpu_stats = json.load(f)
+            except json.JSONDecodeError:
+                self.cpu_stats = {"readings": []}
+        else:
+            self.cpu_stats = {"readings": []}
+
+    def _update_cpu_stats(self, cpu_usage: float):
+        current_time = datetime.datetime.now()
+        
+        if (current_time - self.last_stats_update).total_seconds() < self.stats_update_interval:
+            return
+            
+        avg_cpu = sum(self.cpu_history) / len(self.cpu_history) if self.cpu_history else cpu_usage
+        
+        reading = {
+            "timestamp": current_time.isoformat(),
+            "current_cpu": round(cpu_usage, 2),
+            "average_cpu": round(avg_cpu, 2),
+            "frame_skip": self.frame_skip
+        }
+        
+        self.cpu_stats["readings"].append(reading)
+        
+        if len(self.cpu_stats["readings"]) > 1000:
+            self.cpu_stats["readings"] = self.cpu_stats["readings"][-1000:]
+        
+        try:
+            with open(self.stats_file, 'w') as f:
+                json.dump(self.cpu_stats, f, indent=2)
+            self.last_stats_update = current_time
+        except Exception as e:
+            logging.error(f"Failed to update CPU stats: {str(e)}")
+
+    def _get_cpu_usage(self) -> float:
+        try:
+            if self.last_cpu_time is None:
+                with open('/proc/stat', 'r') as f:
+                    cpu = f.readline().split()[1:]
+                    idle_time = float(cpu[3])
+                    total_time = sum(float(x) for x in cpu)
+                    self.last_idle_time = idle_time
+                    self.last_cpu_time = total_time
+                return 0.0
+                
+            with open('/proc/stat', 'r') as f:
+                cpu = f.readline().split()[1:]
+                idle_time = float(cpu[3])
+                total_time = sum(float(x) for x in cpu)
+                
+            idle_diff = idle_time - self.last_idle_time
+            total_diff = total_time - self.last_cpu_time
+            
+            self.last_idle_time = idle_time
+            self.last_cpu_time = total_time
+            
+            if total_diff == 0:
+                return 0.0
+                
+            cpu_usage = 100.0 * (1.0 - idle_diff/total_diff)
+            return max(0.0, min(100.0, cpu_usage))  
+            
+        except Exception as e:
+            logging.error(f"Error reading CPU usage: {str(e)}")
+            return 0.0
+
+    def _adjust_frame_skip(self, cpu_usage: float):
+        self.cpu_history.append(cpu_usage)
+        if len(self.cpu_history) > self.history_size:
+            self.cpu_history.pop(0)
+            
+        avg_cpu = sum(self.cpu_history) / len(self.cpu_history)
+        
+        if avg_cpu > self.cpu_high_threshold:
+            self.frame_skip = min(self.frame_skip + 1, self.max_frame_skip)
+        elif avg_cpu < self.cpu_medium_threshold:
+            self.frame_skip = max(self.frame_skip - 1, self.min_frame_skip)
+        elif avg_cpu > self.cpu_medium_threshold:
+            if cpu_usage > avg_cpu:
+                self.frame_skip = min(self.frame_skip + 1, self.max_frame_skip)
+            else:
+                self.frame_skip = max(self.frame_skip - 1, self.min_frame_skip)
+        
+        self._update_cpu_stats(cpu_usage)
+        
+        logging.debug(f"CPU: {cpu_usage:.1f}%, Avg: {avg_cpu:.1f}%, Skip: {self.frame_skip}")
+
+    def _adjust_check_interval(self, cpu_usage: float):
+        if cpu_usage > self.cpu_high_threshold:
+            self.check_interval = min(10.0, self.check_interval * 1.5)
+        elif cpu_usage < self.cpu_medium_threshold:
+            self.check_interval = max(5.0, self.check_interval * 0.8)
 
     def _setup_keyboard_listener(self):
         def on_press(key):
@@ -141,7 +255,7 @@ class SecurityCamera:
             top, right, bottom, left = face_location
             
             height, width = frame.shape[:2]
-            padding = int(min(height, width) * 0.2)
+            padding = int(min(height, width) * 0.2)  
             
             pad_top = max(0, top - padding)
             pad_bottom = min(height, bottom + padding)
@@ -233,8 +347,14 @@ class SecurityCamera:
                     logging.info("Exit sequence detected (QUIT)")
                     break
                 
-                if time_diff >= self.check_interval:
+                cpu_usage = self._get_cpu_usage()
+                self._adjust_frame_skip(cpu_usage)
+                self.frame_counter = (self.frame_counter + 1) % self.frame_skip
+                
+                if time_diff >= self.check_interval and self.frame_counter == 0:
                     authorized_found, face_locations, names = self._process_frame(frame)
+                    
+                    self._adjust_check_interval(cpu_usage)
                     
                     for (top, right, bottom, left), name in zip(face_locations, names):
                         color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
@@ -279,9 +399,10 @@ class SecurityCamera:
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
                 else:
                     next_check = self.check_interval - time_diff
-                    status = f"Next check in: {next_check:.1f}s"
+                    avg_cpu = sum(self.cpu_history) / len(self.cpu_history) if self.cpu_history else cpu_usage
+                    status = f"Next check in: {next_check:.1f}s | CPU: {cpu_usage:.1f}% (Avg: {avg_cpu:.1f}%) | Skip: {self.frame_skip}"
                     cv2.putText(frame, status, (10, 30),
-                              cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
                 
                 if self.show_camera:
                     try:
@@ -342,6 +463,13 @@ class SecurityCamera:
             self.keyboard_listener.stop()
         self.camera.release()
         cv2.destroyAllWindows()
+        
+        if hasattr(self, 'cpu_stats'):
+            try:
+                with open(self.stats_file, 'w') as f:
+                    json.dump(self.cpu_stats, f, indent=2)
+            except Exception as e:
+                logging.error(f"Failed to save final CPU stats: {str(e)}")
 
 if __name__ == "__main__":
     try:
